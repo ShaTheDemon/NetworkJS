@@ -48,9 +48,11 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.EnumSet;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
@@ -403,6 +405,29 @@ public class DiscordBinding {
     }
 
     /**
+     * Discord tu choi ca tin nhan neu 2 component co cung custom_id.
+     * Neu script lo tao id trung, tu dong them hau to ":d2", ":d3"... (va ghi canh bao)
+     * de tin van gui duoc. Nut link (url) khong co id nen bo qua.
+     */
+    private static Map<String, Object> ensureUniqueId(Map<String, Object> data, Set<String> usedIds) {
+        if (data.get("id") == null || data.get("url") != null) return data;
+        String id = truncate(String.valueOf(data.get("id")), 100);
+        if (usedIds.add(id)) return data;
+
+        int n = 2;
+        String candidate;
+        do {
+            String suffix = ":d" + n++;
+            candidate = truncate(id, 100 - suffix.length()) + suffix;
+        } while (!usedIds.add(candidate));
+
+        NetworkJS.LOGGER.warn("Duplicate Discord component id '" + id + "' renamed to '" + candidate + "'");
+        Map<String, Object> copy = new LinkedHashMap<>(data);
+        copy.put("id", candidate);
+        return copy;
+    }
+
+    /**
      * Gop button + dropdown thanh cac hang (ActionRow).
      * - Button xep toi da 5 cai / hang.
      * - Moi dropdown chiem tron 1 hang.
@@ -413,10 +438,12 @@ public class DiscordBinding {
         List<ActionRow> rows = new ArrayList<>();
         if (components == null) return rows;
         List<Button> current = new ArrayList<>();
+        Set<String> usedIds = new HashSet<>();
 
-        for (Map<String, Object> data : components) {
+        for (Map<String, Object> original : components) {
             if (rows.size() >= 5) break;
-            if (data == null) continue;
+            if (original == null) continue;
+            Map<String, Object> data = ensureUniqueId(original, usedIds);
 
             String type = String.valueOf(data.getOrDefault("type", "button")).toLowerCase();
             if (type.equals("select") || type.equals("dropdown")) {
