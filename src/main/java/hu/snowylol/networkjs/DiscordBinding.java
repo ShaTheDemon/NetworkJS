@@ -7,6 +7,10 @@ import net.dv8tion.jda.api.events.message.MessageReceivedEvent;
 import net.dv8tion.jda.api.hooks.ListenerAdapter;
 import net.dv8tion.jda.api.requests.GatewayIntent;
 import net.dv8tion.jda.api.EmbedBuilder;
+import net.dv8tion.jda.api.entities.MessageEmbed;
+import net.dv8tion.jda.api.events.interaction.component.ButtonInteractionEvent;
+import net.dv8tion.jda.api.interactions.components.ActionRow;
+import net.dv8tion.jda.api.interactions.components.buttons.Button;
 
 import java.util.Map;
 import java.util.HashMap;
@@ -22,6 +26,7 @@ public class DiscordBinding {
     private Map<String, String> channels;
     private boolean sanitizeMessages;
     private List<Consumer<DiscordMessage>> messageCallbacks;
+    private volatile Consumer<DiscordButton> buttonCallback;
     
     public DiscordBinding(Map<String, Object> configMap) {
         this.token = (String) configMap.get("token");
@@ -144,6 +149,100 @@ public class DiscordBinding {
         }
     }
     
+    MessageEmbed buildEmbed(Map<String, Object> embedData) {
+        EmbedBuilder builder = new EmbedBuilder();
+        if (embedData.containsKey("title")) {
+            builder.setTitle(String.valueOf(embedData.get("title")));
+        }
+        if (embedData.containsKey("description")) {
+            String desc = String.valueOf(embedData.get("description"));
+            builder.setDescription(sanitizeMessages ? sanitizeMessage(desc) : desc);
+        }
+        if (embedData.get("color") instanceof Number) {
+            builder.setColor(((Number) embedData.get("color")).intValue());
+        }
+        if (embedData.containsKey("footer")) {
+            builder.setFooter(String.valueOf(embedData.get("footer")));
+        }
+        if (embedData.get("fields") instanceof List<?> fieldList) {
+            for (Object item : fieldList) {
+                if (item instanceof Map<?, ?> field) {
+                    builder.addField(String.valueOf(field.get("name")), String.valueOf(field.get("value")), Boolean.TRUE.equals(field.get("inline")));
+                }
+            }
+        }
+        return builder.build();
+    }
+
+    static Button buildButton(Map<String, Object> data) {
+        if (data == null || data.get("id") == null || data.get("label") == null) return null;
+        String id = String.valueOf(data.get("id"));
+        String label = String.valueOf(data.get("label"));
+        String style = String.valueOf(data.getOrDefault("style", "primary")).toLowerCase();
+        Button button;
+        switch (style) {
+            case "secondary":
+                button = Button.secondary(id, label);
+                break;
+            case "success":
+                button = Button.success(id, label);
+                break;
+            case "danger":
+                button = Button.danger(id, label);
+                break;
+            default:
+                button = Button.primary(id, label);
+        }
+        if (Boolean.TRUE.equals(data.get("disabled"))) {
+            button = button.asDisabled();
+        }
+        return button;
+    }
+
+    static List<ActionRow> buildRows(List<Map<String, Object>> buttons) {
+        List<ActionRow> rows = new ArrayList<>();
+        if (buttons == null) return rows;
+        List<Button> current = new ArrayList<>();
+        for (Map<String, Object> data : buttons) {
+            Button button = buildButton(data);
+            if (button == null) continue;
+            current.add(button);
+            if (current.size() == 5) {
+                rows.add(ActionRow.of(current));
+                current = new ArrayList<>();
+                if (rows.size() == 5) break;
+            }
+        }
+        if (!current.isEmpty() && rows.size() < 5) {
+            rows.add(ActionRow.of(current));
+        }
+        return rows;
+    }
+
+    public boolean sendEmbedWithButtons(String channelKey, Map<String, Object> embedData, List<Map<String, Object>> buttons) {
+        try {
+            String channelId = channels.get(channelKey);
+            if (channelId == null) {
+                NetworkJS.LOGGER.warn("Channel key '" + channelKey + "' not found in configuration");
+                return false;
+            }
+            TextChannel channel = jda.getTextChannelById(channelId);
+            if (channel == null) {
+                NetworkJS.LOGGER.warn("Discord channel not found: " + channelId);
+                return false;
+            }
+            channel.sendMessageEmbeds(buildEmbed(embedData)).setComponents(buildRows(buttons)).queue();
+            return true;
+        } catch (Exception e) {
+            NetworkJS.LOGGER.error("Failed to send Discord embed with buttons: " + e.getMessage());
+            return false;
+        }
+    }
+
+    public void onButton(Consumer<DiscordButton> callback) {
+        this.buttonCallback = callback;
+    }
+
     public void setActivity(String activity) {
         try {
             jda.getPresence().setActivity(net.dv8tion.jda.api.entities.Activity.playing(activity));
@@ -162,6 +261,70 @@ public class DiscordBinding {
         this.messageCallbacks.add(callback);
     }
     
+    public static class DiscordButton {
+        private final DiscordBinding owner;
+        private final ButtonInteractionEvent event;
+
+        public DiscordButton(DiscordBinding owner, ButtonInteractionEvent event) {
+            this.owner = owner;
+            this.event = event;
+        }
+
+        public String getCustomId() { return event.getComponentId(); }
+        public String getUserId() { return event.getUser().getId(); }
+        public String getUserName() { return event.getUser().getName(); }
+        public String getChannelId() { return event.getChannel().getId(); }
+        public String getMessageId() { return event.getMessageId(); }
+        public boolean isAcknowledged() { return event.isAcknowledged(); }
+
+        public boolean deferEdit() {
+            try {
+                if (event.isAcknowledged()) return false;
+                event.deferEdit().queue();
+                return true;
+            } catch (Exception e) {
+                NetworkJS.LOGGER.error("Failed to defer Discord button: " + e.getMessage());
+                return false;
+            }
+        }
+
+        public boolean reply(String text) {
+            try {
+                String finalText = text == null ? "" : text;
+                if (finalText.length() > 2000) finalText = finalText.substring(0, 2000);
+                if (event.isAcknowledged()) {
+                    event.getHook().sendMessage(finalText).setEphemeral(true).queue();
+                } else {
+                    event.reply(finalText).setEphemeral(true).queue();
+                }
+                return true;
+            } catch (Exception e) {
+                NetworkJS.LOGGER.error("Failed to reply to Discord button: " + e.getMessage());
+                return false;
+            }
+        }
+
+        public boolean editEmbed(Map<String, Object> embedData) {
+            return editEmbed(embedData, null);
+        }
+
+        public boolean editEmbed(Map<String, Object> embedData, List<Map<String, Object>> buttons) {
+            try {
+                MessageEmbed embed = owner.buildEmbed(embedData);
+                List<ActionRow> rows = buildRows(buttons);
+                if (event.isAcknowledged()) {
+                    event.getHook().editOriginalEmbeds(embed).setComponents(rows).queue();
+                } else {
+                    event.editMessageEmbeds(embed).setComponents(rows).queue();
+                }
+                return true;
+            } catch (Exception e) {
+                NetworkJS.LOGGER.error("Failed to edit Discord button message: " + e.getMessage());
+                return false;
+            }
+        }
+    }
+
     public static class DiscordMessage {
         private final String content;
         private final String author;
@@ -192,7 +355,25 @@ public class DiscordBinding {
     
     private class MessageListener extends ListenerAdapter {
         @Override
+        public void onButtonInteraction(ButtonInteractionEvent event) {
+            Consumer<DiscordButton> handler = buttonCallback;
+            if (handler == null) return;
+            DiscordButton button = new DiscordButton(DiscordBinding.this, event);
+            try {
+                handler.accept(button);
+            } catch (Exception e) {
+                NetworkJS.LOGGER.error("Error in Discord button callback: " + e.getMessage());
+                try {
+                    if (!event.isAcknowledged()) {
+                        event.reply("Co loi khi xu ly nut nay.").setEphemeral(true).queue();
+                    }
+                } catch (Exception ignored) {}
+            }
+        }
+
+        @Override
         public void onMessageReceived(MessageReceivedEvent event) {
+            if (messageCallbacks.isEmpty()) return;
             if (event.getAuthor().isBot()) return;
             
             String content = event.getMessage().getContentDisplay();
@@ -260,8 +441,6 @@ public class DiscordBinding {
                     NetworkJS.LOGGER.error("Error in Discord message callback: " + e.getMessage());
                 }
             }
-            
-            NetworkJS.LOGGER.info("Discord message received from " + author + ": " + content);
         }
     }
 }
