@@ -245,6 +245,32 @@ public class DiscordBinding {
     }
 
     /**
+     * Emoji co the la:
+     *  - chuoi: "🛒" hoac "<:ten:id>" / "<a:ten:id>" (emoji server)
+     *  - object: {name: "🛒"} hoac {name: "ten", id: "123...", animated: true} (dang cua Discord API)
+     */
+    static Emoji parseEmoji(Object value) {
+        if (value == null) return null;
+        try {
+            if (value instanceof Map<?, ?> map) {
+                Object name = map.get("name");
+                if (name == null) return null;
+                Object id = map.get("id");
+                if (id != null && !String.valueOf(id).isBlank()) {
+                    return Emoji.fromCustom(String.valueOf(name), Long.parseLong(String.valueOf(id)),
+                            Boolean.TRUE.equals(map.get("animated")));
+                }
+                return Emoji.fromUnicode(String.valueOf(name));
+            }
+            String text = String.valueOf(value).trim();
+            return text.isEmpty() ? null : Emoji.fromFormatted(text);
+        } catch (Exception e) {
+            NetworkJS.LOGGER.warn("Invalid Discord emoji: " + value);
+            return null;
+        }
+    }
+
+    /**
      * embedData: title, url, description, color (number hoac "#RRGGBB"), footer, footerIcon,
      * author, authorUrl, authorIcon, thumbnail, image, timestamp (true), fields:[{name,value,inline}]
      */
@@ -317,7 +343,8 @@ public class DiscordBinding {
         }
         if (data.get("emoji") != null) {
             try {
-                button = button.withEmoji(Emoji.fromFormatted(String.valueOf(data.get("emoji"))));
+                Emoji emoji = parseEmoji(data.get("emoji"));
+                if (emoji != null) button = button.withEmoji(emoji);
             } catch (Exception ignored) {}
         }
         if (Boolean.TRUE.equals(data.get("disabled"))) {
@@ -353,7 +380,8 @@ public class DiscordBinding {
             }
             if (o.get("emoji") != null) {
                 try {
-                    option = option.withEmoji(Emoji.fromFormatted(String.valueOf(o.get("emoji"))));
+                    Emoji emoji = parseEmoji(o.get("emoji"));
+                    if (emoji != null) option = option.withEmoji(emoji);
                 } catch (Exception ignored) {}
             }
             if (Boolean.TRUE.equals(o.get("default"))) {
